@@ -11,19 +11,19 @@ import kotlin.reflect.KParameter
 import kotlin.reflect.full.primaryConstructor
 
 /*
- * Выполнение запросов через JDBC — аналог `ToList()` / `AsEnumerable()` в LINQ.
+ * Query execution over JDBC — the counterpart of `ToList()` / `AsEnumerable()` in LINQ.
  *
- * SQL берётся из SqlCache (форма запроса → текст с `$n`), `$n` переводятся в JDBC-шные `?`,
- * а строки результата собираются в объекты по дереву проекции:
- *  - `from<User>(...)`                     → User по именам колонок (`order_total` → `orderTotal`);
- *  - `select { u, o -> UserOrder(...) }`   → конструктор UserOrder, аргументы — колонки по порядку;
+ * SQL comes from SqlCache (query shape → text with `$n`), `$n` are turned into JDBC `?`,
+ * and result rows are assembled into objects according to the projection tree:
+ *  - `from<User>(...)`                     → User by column names (`order_total` → `orderTotal`);
+ *  - `select { u, o -> UserOrder(...) }`   → the UserOrder constructor, arguments are the columns in order;
  *  - `select { it.name to it.age }`        → Pair;
- *  - `select { _, o -> o }`                → Order из колонок `o.*`;
- *  - `select { it.email }`                 → одно значение.
+ *  - `select { _, o -> o }`                → Order from the `o.*` columns;
+ *  - `select { it.email }`                 → a single value.
  */
 
 fun <A : Any> Query<A>.toSequence(connection: Connection, cache: SqlCache = SqlCache.Default): ResultSequence<A> {
-    // Query<A> создаётся только из Table<A>, так что тип строки — A.
+    // Query<A> is only created from Table<A>, so the row type is A.
     @Suppress("UNCHECKED_CAST")
     val reader = EntityReader(model.from.type as KClass<A>)
     return ResultSequence(connection, toCachedSql(cache), reader::read)
@@ -43,14 +43,14 @@ fun <R> SelectQuery<R>.toList(connection: Connection, cache: SqlCache = SqlCache
     toSequence(connection, cache).use { it.toList() }
 
 /**
- * Ленивый результат запроса. Запрос выполняется при начале итерации, строки читаются по одной.
+ * A lazy query result. The query runs when iteration starts, and rows are read one at a time.
  *
- * Обычный `Sequence` нельзя закрыть: если не дочитать его до конца, `ResultSet` останется открытым.
- * Поэтому последовательность — ещё и [AutoCloseable] (как `File.useLines`):
+ * A plain `Sequence` can't be closed: if it isn't read to the end, the `ResultSet` stays open.
+ * That's why this sequence is also [AutoCloseable] (like `File.useLines`):
  * ```
  * query.toSequence(conn).use { rows -> rows.filter { ... }.take(10).toList() }
  * ```
- * Если дочитать до конца, ресурсы закрываются сами. Итерировать можно один раз.
+ * Reading it to the end closes the resources automatically. It can be iterated only once.
  */
 class ResultSequence<T> internal constructor(
     connection: Connection,
@@ -83,13 +83,13 @@ class ResultSequence<T> internal constructor(
         }
     }
 
-    /** Закрывает statement (и вместе с ним ResultSet). Повторный вызов безопасен. */
+    /** Closes the statement (and the ResultSet with it). Calling it again is safe. */
     override fun close() = prepared.close()
 }
 
 /**
- * `$1, $2, $1` → `?, ?, ?` с развёрнутым списком параметров: JDBC понимает только позиционные `?`.
- * Строковые литералы пропускаются, чтобы не тронуть `'$1'` внутри них.
+ * `$1, $2, $1` → `?, ?, ?` with the parameter list expanded: JDBC only understands positional `?`.
+ * String literals are skipped so that `'$1'` inside them is left untouched.
  */
 fun SqlStatement.toJdbc(): SqlStatement {
     val params = mutableListOf<Any?>()
@@ -127,9 +127,9 @@ private fun sqlArrayType(array: Array<*>) = when (array.firstOrNull()) {
     else -> "VARCHAR"
 }
 
-// --- материализация ---
+// --- materialization ---
 
-/** Сущность из строки по именам колонок: параметр конструктора `orderTotal` ← колонка `order_total`. */
+/** An entity from a row by column names: constructor parameter `orderTotal` ← column `order_total`. */
 private class EntityReader<T : Any>(type: KClass<T>) {
     private val constructor = constructorOf(type)
 
@@ -142,7 +142,7 @@ private class EntityReader<T : Any>(type: KClass<T>) {
     }
 }
 
-/** Читатель строки, построенный по дереву проекции — колонки идут в том же порядке, что и в SELECT. */
+/** A row reader built from the projection tree — columns come in the same order as in the SELECT. */
 private fun projectionReader(projection: LambdaExpression, tables: List<KClass<*>>): (ResultSet) -> Any? =
     when (val body = projection.body) {
         is NewExpression -> {
@@ -175,11 +175,11 @@ private fun <T : Any> constructorOf(type: KClass<T>): KFunction<T> =
         type.primaryConstructor ?: throw IllegalArgumentException("$type has no primary constructor")
     } as KFunction<T>
 
-/** `callBy` — чтобы пропущенные в проекции параметры получили значения по умолчанию. */
+/** `callBy` so that parameters omitted in the projection get their default values. */
 private fun <T> construct(constructor: KFunction<T>, values: List<Pair<KParameter, Any?>>): T =
     constructor.callBy(values.associate { (p, v) -> p to convert(v, p.type.classifier as KClass<*>) })
 
-/** JDBC-значение → тип Kotlin: числа приводятся по ширине, строки — в enum. */
+/** JDBC value → Kotlin type: numbers are converted by width, strings to enums. */
 private fun convert(value: Any?, target: KClass<*>): Any? = when {
     value == null || target.isInstance(value) -> value
     value is Number -> when (target) {
@@ -201,11 +201,11 @@ private val kotlinTypes: Map<String, KClass<*>> = listOf(
     Boolean::class, Char::class, String::class, Any::class,
 ).associateBy { it.qualifiedName!! }
 
-/** Имя типа из дерева (`kotlin.Int?`, `sample.SelectTest.Row`) → KClass. */
+/** A type name from the tree (`kotlin.Int?`, `sample.SelectTest.Row`) → KClass. */
 private fun classOf(typeName: String): KClass<*> {
     val name = typeName.removeSuffix("?")
     kotlinTypes[name]?.let { return it }
-    // Вложенные классы: `a.B.C` → `a.B$C`.
+    // Nested classes: `a.B.C` → `a.B$C`.
     var candidate = name
     while (true) {
         runCatching { return Class.forName(candidate).kotlin }

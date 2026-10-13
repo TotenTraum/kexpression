@@ -4,15 +4,15 @@ import kexpression.*
 import kotlin.reflect.KClass
 
 /**
- * Мини-LINQ-провайдер: предикаты пишутся обычными Kotlin-лямбдами, а превращаются в SQL
- * по дереву выражения — как `IQueryable<T>.Where(Expression<Func<T, bool>>)` в C#.
+ * A mini LINQ provider: predicates are written as plain Kotlin lambdas and turned into SQL
+ * via their expression trees — like `IQueryable<T>.Where(Expression<Func<T, bool>>)` in C#.
  *
- * Join'ы типизированы по числу таблиц: `Query<A>` → `Query2<A, B>` → `Query3<A, B, C>`.
- * i-й параметр любой лямбды соответствует i-й таблице запроса, поэтому
- * `{ u, o -> u.id == o.userId }` транслируется в `u.id = o.user_id`.
- * В `leftJoin` условие ON видит таблицу как non-null, а последующие лямбды — как nullable.
+ * Joins are typed by the number of tables: `Query<A>` → `Query2<A, B>` → `Query3<A, B, C>`.
+ * The i-th parameter of any lambda is the i-th table of the query, so
+ * `{ u, o -> u.id == o.userId }` translates to `u.id = o.user_id`.
+ * In `leftJoin` the ON condition sees the table as non-null, and later lambdas see it as nullable.
  */
-/** Таблица и класс её строк — нужен, чтобы материализовать результат в `toList()`. */
+/** A table and the class of its rows — needed to materialize results in `toList()`. */
 class Table<T : Any>(val name: String, val alias: String, val type: KClass<T>)
 
 inline fun <reified T : Any> table(name: String, alias: String = name) = Table(name, alias, T::class)
@@ -52,24 +52,26 @@ class Query3<A, B, C> internal constructor(model: SelectModel) : QueryBase(model
 }
 
 abstract class QueryBase internal constructor(internal val model: SelectModel) {
-    /** SQL с `?` и уже подставленными значениями — строится заново при каждом вызове. */
-    fun toSql(): SqlStatement = model.toSql(projection = null)
+    /** SQL with `?` and the values already bound — rebuilt on every call. */
+    fun toSql(policy: EvaluationPolicy = SqlEvaluation.Default): SqlStatement = model.toSql(projection = null, policy)
 
-    /** SQL с `$1, $2, ...`: текст берётся из [cache] по форме запроса, заново извлекаются только значения. */
-    fun toCachedSql(cache: SqlCache = SqlCache.Default): SqlStatement = cache.statement(model, projection = null)
+    /** SQL with `$1, $2, ...`: the text comes from [cache] by query shape; only the values are extracted again. */
+    fun toCachedSql(cache: SqlCache = SqlCache.Default, policy: EvaluationPolicy = SqlEvaluation.Default): SqlStatement =
+        cache.statement(model, projection = null, policy)
 }
 
 /**
- * Запрос с проекцией — результат `select { ... }`, аналог `IQueryable<R>` после `Select` в LINQ.
- * Колонки выводятся из дерева проекции: аргументы конструктора, `a to b` или одно выражение.
+ * A query with a projection — the result of `select { ... }`, like `IQueryable<R>` after `Select` in LINQ.
+ * Columns are derived from the projection tree: constructor arguments, `a to b`, or a single expression.
  */
 class SelectQuery<R> internal constructor(
     internal val model: SelectModel,
     internal val projection: LambdaExpression,
 ) {
-    fun toSql(): SqlStatement = model.toSql(projection)
+    fun toSql(policy: EvaluationPolicy = SqlEvaluation.Default): SqlStatement = model.toSql(projection, policy)
 
-    fun toCachedSql(cache: SqlCache = SqlCache.Default): SqlStatement = cache.statement(model, projection)
+    fun toCachedSql(cache: SqlCache = SqlCache.Default, policy: EvaluationPolicy = SqlEvaluation.Default): SqlStatement =
+        cache.statement(model, projection, policy)
 }
 
 internal data class JoinClause(val kind: String, val table: Table<*>, val on: LambdaExpression)
@@ -88,20 +90,20 @@ internal data class SelectModel(
         return copy(joins = joins + JoinClause(kind, table, on.toExpression()))
     }
 
-    /** Все лямбды запроса в фиксированном порядке — по нему нумеруются захваченные значения. */
+    /** All lambdas of the query in a fixed order — captured values are numbered in this order. */
     fun lambdas(projection: LambdaExpression?): List<LambdaExpression> =
         listOfNotNull(projection) + joins.map { it.on } + filters + order.map { it.first }
 
-    fun toSql(projection: LambdaExpression?): SqlStatement {
+    fun toSql(projection: LambdaExpression?, policy: EvaluationPolicy): SqlStatement {
         val captures = Captures(lambdas(projection))
-        val r = render(projection, Placeholders.JDBC, captures)
-        return SqlStatement(r.sql, r.slots.map { it.resolve(captures.values) }, r.columns)
+        val r = render(projection, Placeholders.JDBC, captures, policy)
+        return SqlStatement(r.sql, r.slots.map { it.resolve(captures) }, r.columns)
     }
 
-    fun render(projection: LambdaExpression?, style: Placeholders, captures: Captures): Rendered {
+    fun render(projection: LambdaExpression?, style: Placeholders, captures: Captures, policy: EvaluationPolicy): Rendered {
         val sources = listOf(from) + joins.map { it.table }
-        val translator = SqlTranslator(sources.map { it.alias }, qualify = sources.size > 1, style, captures)
-        // Порядок трансляции = порядок в тексте, чтобы `?` совпадали с parameters.
+        val translator = SqlTranslator(sources.map { it.alias }, qualify = sources.size > 1, style, captures, policy)
+        // Translation order = text order, so that `?` line up with parameters.
         val columns = projection?.let { translator.projection(it) }
         val sql = buildString {
             append("SELECT ")
@@ -128,16 +130,39 @@ internal data class SelectModel(
 
 internal class Rendered(val sql: String, val slots: List<ValueSource>, val columns: List<String>)
 
-/** [columns] — имена колонок результата для проекции (пусто для `SELECT *`). */
+/** [columns] are the result column names for a projection (empty for `SELECT *`). */
 data class SqlStatement(val sql: String, val parameters: List<Any?>, val columns: List<String> = emptyList())
 
 internal data class Column(val sql: String, val name: String)
 
+/**
+ * A database function called from Kotlin: `@SqlFunction("datetime") fun dateTime(d: LocalDate, t: LocalTime)`
+ * translates to `datetime(<d>, <t>)`. The call is never evaluated on the client (see [Translatable]);
+ * the arguments are translated as usual — columns, parameters, nested calls.
+ */
+@Translatable
+@Target(AnnotationTarget.FUNCTION)
+@Retention(AnnotationRetention.BINARY)
+annotation class SqlFunction(val name: String, val schema: String = "")
+
+/** [EvaluableExpression] evaluation policies for SQL. */
+object SqlEvaluation {
+    /**
+     * Arithmetic and logic over values (`minAge + 50`) stay in SQL, as parameters: `$1 + 50`;
+     * everything else (properties and function calls on captured objects) is evaluated on the client.
+     */
+    val Default = EvaluationPolicy { node ->
+        !node.original.walk().all {
+            it is BinaryExpression || it is UnaryExpression || it is ConstantExpression || it is CapturedExpression
+        }
+    }
+}
+
 internal enum class Placeholders {
-    /** `?`; значения, от которых зависит текст (`IN`-списки, шаблоны `LIKE`), разворачиваются на месте. */
+    /** `?`; values the text depends on (`IN` lists, `LIKE` patterns) are expanded in place. */
     JDBC,
 
-    /** `$1, $2, ...`; текст не зависит от значений: `= ANY($1)`, `LIKE '%' || $1`. Одна переменная — один номер. */
+    /** `$1, $2, ...`; the text doesn't depend on values: `= ANY($1)`, `LIKE '%' || $1`. One variable, one number. */
     NUMBERED,
 }
 
@@ -146,19 +171,20 @@ private class SqlTranslator(
     private val qualify: Boolean,
     private val style: Placeholders,
     private val captures: Captures,
+    private val policy: EvaluationPolicy,
 ) {
-    /** Откуда брать значение для каждого плейсхолдера, по порядку. */
+    /** Where to take the value for each placeholder, in order. */
     val slots = mutableListOf<ValueSource>()
 
-    /** Параметр лямбды → алиас таблицы (по позиции). */
+    /** Lambda parameter → table alias (by position). */
     private var scope: Map<ParameterExpression, String> = emptyMap()
 
     /**
-     * Колонки SELECT:
+     * SELECT columns:
      *  - `UserOrder(name = u.name, total = o.total * 2)` → `u.name, o.total * 2 AS total`;
      *  - `u.name to o.total` → `u.name AS first, o.total AS second`;
-     *  - `o` (вся строка) → `o.*`;
-     *  - любое другое выражение → одна колонка.
+     *  - `o` (the whole row) → `o.*`;
+     *  - any other expression → a single column.
      */
     fun projection(lambda: LambdaExpression): List<Column> {
         scope = lambda.parameters.zip(aliases).toMap()
@@ -173,10 +199,10 @@ private class SqlTranslator(
     }
 
     private fun column(e: Expression, name: String): Column {
-        if (e is NewExpression || e is ParameterExpression) unsupported(e) // вложенные объекты не плоские
+        if (e is NewExpression || e is ParameterExpression) unsupported(e) // nested objects are not flat
         val sql = visit(e)
         val alias = name.toSnakeCase()
-        // `u.name` под именем `name` не требует AS.
+        // `u.name` named `name` needs no AS.
         val sameName = e is MemberExpression && e.receiver is ParameterExpression && e.member.toSnakeCase() == alias
         return Column(if (sameName) sql else "$sql AS ${identifier(alias)}", alias)
     }
@@ -190,7 +216,7 @@ private class SqlTranslator(
 
     private fun visit(e: Expression): String = when (e) {
         is MemberExpression -> column(e)
-        // Захваченные переменные становятся параметрами запроса — защита от SQL-инъекций.
+        // Captured variables become query parameters — protection against SQL injection.
         is CapturedExpression -> bind(valueSource(e))
         is ConstantExpression -> literal(e.value)
         is BinaryExpression -> binary(e)
@@ -201,13 +227,15 @@ private class SqlTranslator(
         }
         is CallExpression -> call(e)
         is ConditionalExpression -> conditional(e)
+        // A subtree without lambda parameters: evaluate on the client (→ parameter) or translate its structure.
+        is EvaluableExpression -> if (policy.shouldEvaluate(e)) bind(valueSource(e)) else visit(e.original)
         else -> unsupported(e)
     }
 
     /**
-     * `o?.total` компилируется в `if (o == null) null else o.total` — в SQL NULL распространяется
-     * сам, поэтому проверку можно отбросить (в т.ч. в цепочках `p?.title?.length`).
-     * Остальные `if` становятся `CASE WHEN`.
+     * `o?.total` compiles to `if (o == null) null else o.total` — in SQL, NULL propagates on its own,
+     * so the check can be dropped (including in chains like `p?.title?.length`).
+     * Other `if`s become `CASE WHEN`.
      */
     private fun conditional(e: ConditionalExpression): String {
         val test = e.test
@@ -248,13 +276,13 @@ private class SqlTranslator(
         return "${operand(e.left, e.operator)} $op ${operand(e.right, e.operator, isRight = true)}"
     }
 
-    /** `o == null` для строки из LEFT JOIN — «строка не найдена», проверяем её ключ `id`. */
+    /** `o == null` for a row from a LEFT JOIN means "no matching row"; check its `id` key. */
     private fun nullable(e: Expression): String =
         if (e is ParameterExpression) qualified(scope[e] ?: unsupported(e), "id") else visit(e)
 
     private fun operand(e: Expression, parent: BinaryOperator, isRight: Boolean = false): String {
         val sql = visit(e)
-        // Операторы левоассоциативны: `a - (b - c)` требует скобок справа при равном приоритете.
+        // Operators are left-associative: `a - (b - c)` needs parentheses on the right at equal precedence.
         val needsParens = e is BinaryExpression &&
             (precedence(e.operator) < precedence(parent) || isRight && precedence(e.operator) == precedence(parent))
         return if (needsParens) "($sql)" else sql
@@ -270,6 +298,13 @@ private class SqlTranslator(
     }
 
     private fun call(e: CallExpression): String {
+        e.annotation<SqlFunction>()?.let { fn ->
+            val name = if (fn.schema.isEmpty()) fn.name else "${fn.schema}.${fn.name}"
+            // The dispatch receiver (object, companion, class instance) is just a Kotlin namespace and is not
+            // passed to SQL. The receiver of an extension function (including member extensions) is the first argument.
+            val args = listOfNotNull(e.extensionReceiver) + e.arguments
+            return "$name(${args.joinToString { visit(it) }})"
+        }
         val receiver = e.receiver ?: unsupported(e)
         return when (e.function) {
             "startsWith" -> "${visit(receiver)} LIKE ${likePattern(e.arguments.single(), suffix = "%")}"
@@ -281,12 +316,12 @@ private class SqlTranslator(
                     val values = valueSource(receiver)
                     val column = visit(e.arguments.single())
                     when (style) {
-                        // `it.id in ids` → `id IN (?, ?, ?)` — число `?` зависит от размера списка.
+                        // `it.id in ids` → `id IN (?, ?, ?)` — the number of `?` depends on the list size.
                         Placeholders.JDBC -> {
-                            val list = values.resolve(captures.values) as? Iterable<*> ?: unsupported(e)
+                            val list = values.resolve(captures) as? Iterable<*> ?: unsupported(e)
                             "$column IN (${list.joinToString { bind(ValueSource.Literal(it)) }})"
                         }
-                        // `it.id in ids` → `id = ANY($1)` — один параметр-массив, текст стабилен.
+                        // `it.id in ids` → `id = ANY($1)` — a single array parameter, the text is stable.
                         Placeholders.NUMBERED -> "$column = ANY(${bind(ValueSource.AsArray(values))})"
                     }
                 }
@@ -304,7 +339,7 @@ private class SqlTranslator(
         val value = valueSource(arg)
         return when (style) {
             Placeholders.JDBC -> bind(ValueSource.Pattern(prefix, value, suffix))
-            // Склейка в SQL, а не в значении: `$1` остаётся «чистым» значением переменной.
+            // Concatenate in SQL, not in the value: `$1` stays the variable's plain value.
             Placeholders.NUMBERED -> listOfNotNull(
                 prefix.takeIf { it.isNotEmpty() }?.let(::literal),
                 bind(value),
@@ -314,32 +349,34 @@ private class SqlTranslator(
     }
 
     private fun column(e: MemberExpression): String {
-        val receiver = e.receiver as? ParameterExpression ?: return bind(valueSource(e))
+        // Properties of captured objects arrive as EvaluableExpression; only hand-built trees end up here,
+        // and there is no way to evaluate them without reflection.
+        val receiver = e.receiver as? ParameterExpression ?: unsupported(e)
         return qualified(scope[receiver] ?: unsupported(e), e.member.toSnakeCase())
     }
 
-    /** Алиасы-ключевые слова (`second`, `value`, `order`, ...) берутся в кавычки. */
+    /** Aliases that are keywords (`second`, `value`, `order`, ...) are quoted. */
     private fun identifier(name: String) = if (name.uppercase() in RESERVED) "\"$name\"" else name
 
     private fun qualified(alias: String, column: String) = if (qualify) "$alias.$column" else column
 
     /**
-     * Рецепт значения: захваченная переменная или цепочка её свойств (`filter.range.min`).
-     * Свойства захваченных объектов вычисляются на клиенте, как это делает EF Core.
+     * A value recipe: a captured variable or an evaluator generated by the compiler
+     * (`filter.minAge`, `repo.activeIds()`) — no reflection.
      */
     private fun valueSource(e: Expression): ValueSource = when (e) {
         is CapturedExpression -> ValueSource.Capture(captures.indexOf(e))
-        is MemberExpression -> ValueSource.Member(valueSource(e.receiver ?: unsupported(e)), e.member)
+        is EvaluableExpression -> ValueSource.Evaluate(captures.indexOf(e))
         else -> unsupported(e)
     }
 
     private fun bind(source: ValueSource): String = when (style) {
         Placeholders.JDBC -> {
-            slots += ValueSource.Literal(source.resolve(captures.values))
+            slots += ValueSource.Literal(source.resolve(captures))
             "?"
         }
         Placeholders.NUMBERED -> {
-            // Одна и та же переменная получает один номер.
+            // The same variable gets the same number.
             val index = slots.indexOf(source).takeIf { it >= 0 } ?: slots.size.also { slots += source }
             "$${index + 1}"
         }

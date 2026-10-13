@@ -8,7 +8,7 @@ application { mainClass.set("sample.MainKt") }
 dependencies {
     implementation(project(":kexpression-runtime"))
     implementation(kotlin("reflect"))
-    // Подключаем наш IR-плагин к компиляции main и test.
+    // Attach our IR plugin to the main and test compilations.
     kotlinCompilerPluginClasspath(project(":kexpression-compiler-plugin"))
 
     testImplementation(kotlin("test"))

@@ -1,5 +1,51 @@
+### Gradle ###
 .gradle/
 build/
+!gradle/wrapper/gradle-wrapper.jar
+!**/src/main/**/build/
+!**/src/test/**/build/
+
+### Kotlin ###
+.kotlin/
+*.hprof
+hs_err_pid*.log
+replay_pid*.log
+
+### Kotlin/JS and Wasm ###
+# kotlin-js-store/yarn.lock stays committed: it pins JS dependencies for reproducible builds.
+node_modules/
+
+### IntelliJ IDEA / Fleet ###
 .idea/
 *.iml
-.kotlin/
+*.iws
+*.ipr
+out/
+!**/src/main/**/out/
+!**/src/test/**/out/
+.fleet/
+
+### Eclipse / VS Code ###
+.apt_generated
+.classpath
+.factorypath
+.project
+.settings
+bin/
+!**/src/main/**/bin/
+!**/src/test/**/bin/
+.vscode/
+
+### OS ###
+.DS_Store
+Thumbs.db
+
+### Secrets ###
+# Never commit credentials or signing keys: keep them in ~/.gradle/gradle.properties.
+local.properties
+*.gpg
+*.asc
+secring.*
+
+### Misc ###
+*.log

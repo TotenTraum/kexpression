@@ -7,7 +7,7 @@ import kotlin.test.assertSame
 class SqlCacheTest {
     private val cache = SqlCache()
 
-    /** Одна и та же строка кода, вызываемая с разными значениями. */
+    /** The same line of code, called with different values. */
     private fun adults(minAge: Int, role: Role) = from<User>("users")
         .where { it.age >= minAge && it.role == role && it.age < minAge + 50 }
         .toCachedSql(cache)
@@ -18,7 +18,7 @@ class SqlCacheTest {
         val second = adults(30, Role.USER)
 
         assertEquals("SELECT * FROM users WHERE age >= $1 AND role = $2 AND age < $1 + 50", first.sql)
-        // Одна переменная (`minAge`) — один номер, даже если используется дважды.
+        // One variable (`minAge`) gets one number, even when used twice.
         assertEquals(listOf<Any?>(18, Role.ADMIN), first.parameters)
         assertEquals(listOf<Any?>(30, Role.USER), second.parameters)
         assertSame(first.sql, second.sql)

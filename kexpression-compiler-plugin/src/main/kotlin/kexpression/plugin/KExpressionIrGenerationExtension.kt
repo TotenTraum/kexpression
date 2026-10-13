@@ -40,7 +40,7 @@ class KExpressionIrGenerationExtension(private val messageCollector: MessageColl
     }
 }
 
-/** Функции runtime-библиотеки, которые использует сгенерированный код. */
+/** Runtime library functions used by the generated code. */
 internal class RuntimeSymbols(private val find: (FqName, String) -> IrSimpleFunctionSymbol?) {
     val expr = function(RUNTIME_PACKAGE, "expr")
     val quoteExpr = function(INTERNAL_PACKAGE, "quoteExpr")
@@ -59,6 +59,8 @@ internal class RuntimeSymbols(private val find: (FqName, String) -> IrSimpleFunc
     val typeOperator = function(INTERNAL_PACKAGE, "typeOperator")
     val template = function(INTERNAL_PACKAGE, "template")
     val array = function(INTERNAL_PACKAGE, "array")
+    val evaluable = function(INTERNAL_PACKAGE, "evaluable")
+    val annotations = function(INTERNAL_PACKAGE, "annotations")
 
     private fun function(pkg: FqName, name: String): IrSimpleFunctionSymbol =
         find(pkg, name) ?: throw MissingRuntime()
@@ -73,16 +75,16 @@ internal class RuntimeSymbols(private val find: (FqName, String) -> IrSimpleFunc
                     finder.findFunctions(CallableId(pkg, Name.identifier(name))).singleOrNull()
                 }
             } catch (_: MissingRuntime) {
-                null // kexpression-runtime нет в classpath — модулю нечего трансформировать.
+                null // kexpression-runtime is not on the classpath — nothing to transform in this module.
             }
         }
     }
 }
 
 /**
- * Находит лямбды, которые нужно процитировать:
- *  - аргумент `expr { ... }` — вызов заменяется на `quoteExpr(lambda, <дерево>)`;
- *  - аргумент параметра с `@Quoted` — лямбда оборачивается в `quoteFunction(lambda, <дерево>)`.
+ * Finds lambdas that need to be quoted:
+ *  - the argument of `expr { ... }` — the call is replaced with `quoteExpr(lambda, <tree>)`;
+ *  - the argument of a `@Quoted` parameter — the lambda is wrapped in `quoteFunction(lambda, <tree>)`.
  */
 private class QuoteTransformer(
     private val context: IrPluginContext,
@@ -119,7 +121,7 @@ private class QuoteTransformer(
                 is IrFunctionExpression ->
                     quote(argument, symbols.quoteFunction, argument)
                         ?.let { expression.arguments[parameter.indexInParameters] = it }
-                // Пробрасывание @Quoted-параметра дальше сохраняет дерево — это нормально.
+                // Forwarding a @Quoted parameter keeps its tree — that's fine.
                 is IrGetValue if (argument.symbol.owner as? IrValueParameter)?.hasAnnotation(QUOTED_ANNOTATION) == true -> {}
                 else -> report(
                     argument,
@@ -132,11 +134,11 @@ private class QuoteTransformer(
         return result
     }
 
-    /** Строит `factory<F>(lambda, <дерево>)` или возвращает `null`, если лямбду нельзя процитировать. */
+    /** Builds `factory<F>(lambda, <tree>)`, or returns `null` if the lambda can't be quoted. */
     private fun quote(lambda: IrFunctionExpression, factory: IrSimpleFunctionSymbol, original: IrExpression): IrExpression? {
         val builder = DeclarationIrBuilder(context, currentScope!!.scope.scopeOwnerSymbol, original.startOffset, original.endOffset)
         val tree = try {
-            ExpressionTreeBuilder(builder, symbols).lambda(lambda)
+            ExpressionTreeBuilder(builder, symbols, context).lambda(lambda)
         } catch (e: UnsupportedExpression) {
             report(e.element, "Cannot convert lambda to expression tree: ${e.message}")
             return null

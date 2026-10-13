@@ -103,10 +103,10 @@ class ExprTest {
                 else -> -1
             }
         }
-        // Smart cast — неявное приведение, в дереве его нет.
+        // A smart cast is an implicit conversion; it's not in the tree.
         assertEquals("{ v: Any -> if (v is String) v.length else if (v is Int) v else -1 }", e.text())
         assertEquals(3, e("abc"))
-        assertEquals(-1, e(true)) // не число: на JS `2.5 is Int` истинно — все числа там JS number
+        assertEquals(-1, e(true)) // not a number: on JS `2.5 is Int` is true — every number there is a JS number
     }
 
     @Test

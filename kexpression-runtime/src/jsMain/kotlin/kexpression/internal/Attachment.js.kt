@@ -2,8 +2,8 @@ package kexpression.internal
 
 import kexpression.LambdaExpression
 
-// Лямбда на JS — нативная функция, т.е. объект: дерево кладётся в её свойство, обёртка не нужна.
-// Поэтому ограничения на число параметров здесь нет.
+// On JS a lambda is a native function, i.e. an object: the tree is stored in one of its properties, no wrapper needed.
+// That's why there is no limit on the number of parameters here.
 private const val PROPERTY = $$"$kexpression"
 
 internal actual fun <F : Function<*>> attachExpression(function: F, expression: LambdaExpression): F {

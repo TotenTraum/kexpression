@@ -3,12 +3,12 @@ package kexpression.internal
 import kexpression.LambdaExpression
 
 /**
- * Связывает лямбду с её деревом выражения и возвращает функцию, которую можно передать вместо исходной.
+ * Attaches an expression tree to a lambda and returns a function that can be passed instead of the original.
  *
- * На JVM, Native и Wasm это обёртка, реализующая функциональный тип. На JS классам это запрещено,
- * зато лямбда — обычная JS-функция, и дерево хранится прямо в её свойстве.
+ * On JVM, Native and Wasm this is a wrapper implementing the function type. On JS classes can't do that,
+ * but a lambda is a plain JS function, so the tree is stored directly in one of its properties.
  */
 internal expect fun <F : Function<*>> attachExpression(function: F, expression: LambdaExpression): F
 
-/** Дерево, приложенное [attachExpression], или `null`. */
+/** The tree attached by [attachExpression], or `null`. */
 internal expect fun attachedExpression(function: Function<*>): LambdaExpression?

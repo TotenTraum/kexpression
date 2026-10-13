@@ -3,7 +3,7 @@ package kexpression
 import kexpression.internal.attachedExpression
 
 /**
- * Типизированное дерево выражения лямбды — аналог `Expression<Func<...>>` из C#.
+ * The typed expression tree of a lambda — the counterpart of C#'s `Expression<Func<...>>`.
  *
  * ```
  * val e: Expr<(Int) -> Boolean> = expr { x -> x > 10 }
@@ -19,8 +19,8 @@ class Expr<out F : Function<*>> internal constructor(
     val body: Expression get() = expression.body
 
     /**
-     * Аналог `Expression<T>.Compile()`. Код лямбды сгенерирован статически во время компиляции,
-     * поэтому «компиляция» бесплатна — возвращается исходная лямбда.
+     * The counterpart of `Expression<T>.Compile()`. The lambda's code was generated statically at compile time,
+     * so "compiling" is free: the original lambda is returned.
      */
     fun compile(): F = function
 
@@ -28,18 +28,18 @@ class Expr<out F : Function<*>> internal constructor(
 }
 
 /**
- * Цитирование лямбды: компилятор заменяет этот вызов на код, строящий дерево [Expr].
- * Аналог неявного преобразования лямбды к `Expression<Func<...>>` в C#.
+ * Quotes a lambda: the compiler replaces this call with code that builds the [Expr] tree.
+ * The counterpart of C#'s implicit conversion of a lambda to `Expression<Func<...>>`.
  *
- * Аргумент должен быть лямбда-литералом.
+ * The argument must be a lambda literal.
  */
 @Suppress("UNUSED_PARAMETER")
 fun <F : Function<*>> expr(block: F): Expr<F> =
     throw IllegalStateException("kexpression compiler plugin is not applied to this module")
 
 /**
- * Помечает параметр функционального типа: лямбда-литерал, переданный в него, получит
- * дерево выражения, доступное через [toExpression]. Позволяет писать LINQ-подобные API:
+ * Marks a parameter of a function type: a lambda literal passed to it gets an expression tree,
+ * available via [toExpression]. This makes LINQ-style APIs possible:
  *
  * ```
  * fun <T> Query<T>.where(@Quoted predicate: (T) -> Boolean): Query<T> =
@@ -52,14 +52,14 @@ fun <F : Function<*>> expr(block: F): Expr<F> =
 @Retention(AnnotationRetention.BINARY)
 annotation class Quoted
 
-/** Дерево выражения лямбды, переданной в [Quoted]-параметр, или `null`, если оно недоступно. */
+/** The expression tree of a lambda passed to a [Quoted] parameter, or `null` if it is not available. */
 fun Function<*>.toExpressionOrNull(): LambdaExpression? = attachedExpression(this)
 
-/** Дерево выражения лямбды, переданной в [Quoted]-параметр. */
+/** The expression tree of a lambda passed to a [Quoted] parameter. */
 fun Function<*>.toExpression(): LambdaExpression = toExpressionOrNull()
     ?: throw IllegalArgumentException("Function has no expression tree: pass a lambda literal to a @Quoted parameter")
 
-/** Типизированная обёртка для функции из [Quoted]-параметра. */
+/** A typed wrapper for a function received through a [Quoted] parameter. */
 fun <F : Function<*>> F.toExpr(): Expr<F> = Expr(toExpression(), this)
 
 operator fun <R> Expr<() -> R>.invoke(): R = compile()()

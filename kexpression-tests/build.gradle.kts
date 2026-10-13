@@ -1,6 +1,6 @@
 import org.jetbrains.kotlin.gradle.ExperimentalWasmDsl
 
-// Общие тесты компиляторного плагина и runtime: один и тот же commonTest на JVM, JS, Wasm и Native.
+// Shared tests of the compiler plugin and the runtime: the same commonTest on JVM, JS, Wasm and Native.
 plugins {
     kotlin("multiplatform")
 }
@@ -22,13 +22,13 @@ kotlin {
     }
 }
 
-// Плагин подключается ко всем компиляциям: JVM/JS/Wasm и отдельно Native.
+// The plugin is attached to every compilation: JVM/JS/Wasm, and Native separately.
 dependencies {
     "kotlinCompilerPluginClasspath"(project(":kexpression-compiler-plugin"))
     "kotlinNativeCompilerPluginClasspath"(project(":kexpression-compiler-plugin"))
 }
 
-// Изменения в плагине должны перекомпилировать тесты.
+// Changes to the plugin must recompile the tests.
 tasks.withType<org.jetbrains.kotlin.gradle.tasks.AbstractKotlinCompileTool<*>>().configureEach {
     inputs.files(project(":kexpression-compiler-plugin").tasks.named("jar"))
 }

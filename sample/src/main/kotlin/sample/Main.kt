@@ -13,12 +13,12 @@ data class Product(val id: Long, val title: String)
 fun main() {
     // 1. Expression<Func<int, int, int>> add = (a, b) => a + b * 2;
     val add: Expr<(Int, Int) -> Int> = expr { a, b -> a + b * 2 }
-    println("Дерево:     $add")
-    println("Тело:       ${add.body}")
-    println("Оператор:   ${(add.body as BinaryExpression).operator}")
-    println("Вызов:      ${add(1, 3)}")
+    println("Tree:       $add")
+    println("Body:       ${add.body}")
+    println("Operator:   ${(add.body as BinaryExpression).operator}")
+    println("Call:       ${add(1, 3)}")
 
-    // 2. LINQ-подобный запрос: лямбды транслируются в SQL по дереву выражения.
+    // 2. A LINQ-style query: lambdas are translated to SQL via their expression trees.
     val minAge = 18
     val domain = "@example.com"
     val sql = from<User>("users")
@@ -29,7 +29,7 @@ fun main() {
     println(sql.sql)
     println(sql.parameters)
 
-    // 3. Join: i-й параметр лямбды — i-я таблица запроса.
+    // 3. Join: the i-th lambda parameter is the i-th table of the query.
     val join = from<User>("users", "us")
         .join(table<Order>("orders", "o")) { user, o -> user.id == o.userId }
         .leftJoin(table<Product>("products", "p")) { _, o, p -> o.productId == p.id }
@@ -39,7 +39,7 @@ fun main() {
     println(join.sql)
     println(join.parameters)
 
-    // 4. Проекция: колонки берутся из аргументов конструктора.
+    // 4. Projection: columns come from the constructor arguments.
     val report = from<User>("users", "u")
         .join(table<Order>("orders", "o")) { u, o -> u.id == o.userId }
         .where { _, o -> o.total > 100 }

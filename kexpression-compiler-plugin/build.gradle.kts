@@ -1,6 +1,9 @@
 plugins {
     kotlin("jvm")
+    alias(libs.plugins.publishPlugin)
 }
+
+description = "Kotlin compiler plugin that turns lambda literals into kexpression trees at compile time"
 
 dependencies {
     compileOnly(kotlin("compiler-embeddable"))

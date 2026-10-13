@@ -1,0 +1,9 @@
+# Single source of versions for the whole build.
+# The compiler plugin is compiled against a specific Kotlin compiler: bump `kotlin` everywhere at once.
+
+[versions]
+kotlin = "2.4.20"
+publishPluginVersion = "0.37.0"
+
+[plugins]
+publishPlugin = { id = "com.vanniktech.maven.publish", version.ref = "publishPluginVersion" }

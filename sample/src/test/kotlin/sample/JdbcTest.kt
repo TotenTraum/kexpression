@@ -100,9 +100,9 @@ class JdbcTest {
         val seq = from<User>("users").orderBy { it.id }.toSequence(db)
         assertEquals("SELECT * FROM users ORDER BY id", seq.sql.sql)
         val first =
-            seq.use { rows -> rows.map { it.name }.first() } // недочитанный ResultSet закрыт
+            seq.use { rows -> rows.map { it.name }.first() } // the partially read ResultSet is closed
         assertEquals("alice", first)
-        assertFailsWith<IllegalStateException> { seq.toList() } // повторная итерация запрещена
+        assertFailsWith<IllegalStateException> { seq.toList() } // iterating again is not allowed
     }
 
     @Test

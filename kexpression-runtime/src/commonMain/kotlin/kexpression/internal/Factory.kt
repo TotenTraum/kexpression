@@ -1,14 +1,15 @@
 @file:kotlin.jvm.JvmName("KExpressionFactory")
+@file:Suppress("UNUSED")
 
 package kexpression.internal
 
 import kexpression.*
 
-// Точки входа, на которые компиляторный плагин заменяет лямбды. Не предназначены для ручного вызова.
+// Entry points the compiler plugin rewrites lambdas into. Not intended to be called by hand.
 
 fun <F : Function<*>> quoteExpr(function: F, expression: LambdaExpression): Expr<F> = Expr(expression, function)
 
-/** Прикладывает дерево к лямбде из `@Quoted`-параметра; см. [attachExpression]. */
+/** Attaches the tree to a lambda from a `@Quoted` parameter; see [attachExpression]. */
 fun <F : Function<*>> quoteFunction(function: F, expression: LambdaExpression): F = attachExpression(function, expression)
 
 fun constant(value: Any?, type: String): Expression = ConstantExpression(value, type)
@@ -30,13 +31,21 @@ fun member(receiver: Expression?, member: String, declaringType: String?, type: 
     MemberExpression(receiver, member, declaringType, type)
 
 fun call(
-    receiver: Expression?,
+    dispatchReceiver: Expression?,
+    extensionReceiver: Expression?,
     function: String,
     declaringType: String?,
-    isExtension: Boolean,
     type: String,
+    annotations: List<Annotation>,
     vararg arguments: Expression,
-): Expression = CallExpression(receiver, function, declaringType, isExtension, arguments.asList(), type)
+): Expression = CallExpression(
+    dispatchReceiver, extensionReceiver, function, declaringType, arguments.asList(), type, annotations,
+)
+
+fun annotations(vararg annotations: Annotation): List<Annotation> = annotations.asList()
+
+fun evaluable(original: Expression, evaluate: () -> Any?, type: String): Expression =
+    EvaluableExpression(original, evaluate, type)
 
 fun construct(type: String, parameterNames: List<String>, vararg arguments: Expression): Expression =
     NewExpression(arguments.asList(), parameterNames, type)

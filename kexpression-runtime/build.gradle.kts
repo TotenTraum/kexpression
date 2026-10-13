@@ -3,7 +3,10 @@ import org.jetbrains.kotlin.gradle.ExperimentalWasmDsl
 
 plugins {
     kotlin("multiplatform")
+    alias(libs.plugins.publishPlugin)
 }
+
+description = "Runtime of kexpression: expression tree nodes, expr {}, @Quoted, evaluation policies"
 
 kotlin {
     jvm()
@@ -17,7 +20,7 @@ kotlin {
     linuxArm64()
     mingwX64()
 
-    // nonJs = всё, кроме JS: там лямбды оборачиваются классами, реализующими функциональный тип.
+    // nonJs = everything except JS: there lambdas are wrapped in classes implementing the function type.
     @OptIn(ExperimentalKotlinGradlePluginApi::class)
     applyDefaultHierarchyTemplate {
         common {

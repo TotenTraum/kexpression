@@ -1,6 +1,6 @@
 package kexpression
 
-/** Печатает дерево в виде Kotlin-подобного исходного кода. */
+/** Prints a tree as Kotlin-like source code. */
 internal object ExpressionPrinter {
     fun print(e: Expression): String = when (e) {
         is ConstantExpression -> literal(e.value, e.type)
@@ -26,15 +26,17 @@ internal object ExpressionPrinter {
             if (part is ConstantExpression && part.value is String) escape(part.value) else "\${${print(part)}}"
         }
         is ArrayExpression -> e.elements.joinToString(", ") { print(it) }
+        is EvaluableExpression -> print(e.original)
     }
 
     private fun operand(e: Expression): String = when (e) {
+        is EvaluableExpression -> operand(e.original)
         is BinaryExpression, is ConditionalExpression, is TypeOperatorExpression, is LambdaExpression -> "(${print(e)})"
         else -> print(e)
     }
 
-    // Вид литерала берётся из статического типа узла, а не из значения: на JS Int, Float и Double —
-    // одно и то же JS-число, и `value is Float` верно и для `2`.
+    // The literal form comes from the node's static type, not from the value: on JS, Int, Float and Double
+    // are the same JS number, and `value is Float` is true even for `2`.
     private fun literal(value: Any?, type: String): String = when {
         value == null -> "null"
         value is Enum<*> -> "${value::class.simpleName}.${value.name}"

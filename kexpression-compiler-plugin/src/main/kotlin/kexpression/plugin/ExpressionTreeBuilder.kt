@@ -1,8 +1,25 @@
 package kexpression.plugin
 
+import org.jetbrains.kotlin.backend.common.extensions.IrPluginContext
+import org.jetbrains.kotlin.backend.common.lower.DeclarationIrBuilder
+import org.jetbrains.kotlin.descriptors.DescriptorVisibilities
 import org.jetbrains.kotlin.ir.IrElement
+import org.jetbrains.kotlin.ir.builders.declarations.buildFun
+import org.jetbrains.kotlin.ir.builders.irBlockBody
+import org.jetbrains.kotlin.ir.builders.irReturn
+import org.jetbrains.kotlin.ir.declarations.IrDeclarationOrigin
+import org.jetbrains.kotlin.ir.expressions.impl.IrFunctionExpressionImpl
+import org.jetbrains.kotlin.ir.types.typeWith
+import org.jetbrains.kotlin.ir.util.constructedClass
+import org.jetbrains.kotlin.ir.util.hasAnnotation
+import org.jetbrains.kotlin.ir.visitors.IrElementTransformerVoid
+import org.jetbrains.kotlin.ir.visitors.IrVisitorVoid
+import org.jetbrains.kotlin.ir.visitors.acceptChildrenVoid
+import org.jetbrains.kotlin.ir.visitors.acceptVoid
+import org.jetbrains.kotlin.name.ClassId
+import org.jetbrains.kotlin.name.Name
+import org.jetbrains.kotlin.name.SpecialNames
 import org.jetbrains.kotlin.ir.builders.IrBuilderWithScope
-import org.jetbrains.kotlin.ir.builders.irBoolean
 import org.jetbrains.kotlin.ir.builders.irCall
 import org.jetbrains.kotlin.ir.builders.irNull
 import org.jetbrains.kotlin.ir.builders.irString
@@ -48,28 +65,48 @@ import org.jetbrains.kotlin.ir.util.isFalseConst
 
 internal class UnsupportedExpression(val element: IrElement, message: String) : RuntimeException(message)
 
+private val TRANSLATABLE = ClassId(RUNTIME_PACKAGE, Name.identifier("Translatable"))
+
 /**
- * Переводит IR тела лямбды в IR, который во время выполнения строит эквивалентное дерево
- * `kexpression.Expression` через фабрики из `kexpression.internal`.
+ * Translates the IR of a lambda body into IR that builds the equivalent `kexpression.Expression` tree
+ * at runtime, using the factories from `kexpression.internal`.
  *
- * Пример: `{ x: Int -> x + 1 }` превращается в
+ * Example: `{ x: Int -> x + 1 }` becomes
  * `lambda(binary("PLUS", parameter("x", "kotlin.Int"), constant(1, "kotlin.Int"), "kotlin.Int"), ..., parameter("x", ...))`.
+ *
+ * Funcletizer: the largest subtrees that don't depend on the lambda's parameters (`filter.minAge`, `repo.ids()`)
+ * become `evaluable(<structure>, { <the subtree's original code> }, type)`. The evaluator is generated right here,
+ * so the consumer of the tree needs no reflection. Calls to `@Translatable` functions are never evaluated.
  */
 internal class ExpressionTreeBuilder(
     private val b: IrBuilderWithScope,
     private val symbols: RuntimeSymbols,
+    private val context: IrPluginContext,
 ) {
     private val expressionType = symbols.constant.owner.returnType
     private val parameterExpressionType = symbols.parameter.owner.returnType
 
-    /** Параметры всех лямбд, внутри которых мы сейчас находимся. */
+    /** Parameters of all lambdas we are currently inside. */
     private val lambdaParameters = mutableSetOf<IrValueSymbol>()
 
-    /** Локальные `val` внутри лямбды (в т.ч. временные переменные `?:`, `?.`, `when`) — подставляются по месту. */
+    /** Local `val`s inside the lambda (including temporaries of `?:`, `?.`, `when`) — inlined at their uses. */
     private val locals = mutableMapOf<IrValueSymbol, IrExpression>()
+
+    /** The original initializers of those `val`s — inlined into evaluator code. */
+    private val localInitializers = mutableMapOf<IrValueSymbol, IrExpression>()
+
+    /** `val`s that can't be evaluated on the client: they depend on parameters or on `@Translatable` calls. */
+    private val opaqueLocals = mutableSetOf<IrValueSymbol>()
+
+    /** The parent for evaluator functions: the same as the quoted lambda's. */
+    private var thunkParent: IrDeclarationParent? = null
+
+    /** > 0 while building the structure inside an EvaluableExpression: nested evaluators are not needed. */
+    private var structureOnly = 0
 
     fun lambda(lambda: IrFunctionExpression): IrExpression {
         val function = lambda.function
+        if (thunkParent == null) thunkParent = function.parent
         lambdaParameters += function.parameters.map { it.symbol }
         val body = translate(bodyExpression(function))
         val params = function.parameters.map { parameterRef(it) }
@@ -81,7 +118,7 @@ internal class ExpressionTreeBuilder(
             ?: throw UnsupportedExpression(function, "lambda has no body")
         for (statement in statements.dropLast(1)) {
             if (statement is IrVariable && !statement.isVar && statement.initializer != null) {
-                locals[statement.symbol] = translate(statement.initializer!!)
+                bindLocal(statement)
             } else {
                 throw UnsupportedExpression(statement, "only `val` declarations and a single result expression are allowed in expression lambdas")
             }
@@ -93,13 +130,108 @@ internal class ExpressionTreeBuilder(
         }
     }
 
-    private fun translate(e: IrExpression): IrExpression = when (e) {
+    private fun bindLocal(variable: IrVariable) {
+        val initializer = variable.initializer!!
+        localInitializers[variable.symbol] = initializer
+        if (!isClosed(initializer)) opaqueLocals += variable.symbol
+        locals[variable.symbol] = translate(initializer)
+    }
+
+    private fun translate(e: IrExpression): IrExpression =
+        if (structureOnly == 0 && isEvaluable(e)) evaluable(e) else translateStructure(e)
+
+    // --- funcletizer ---
+
+    /** Not a leaf (constant, variable, object), independent of parameters, free of lambdas and `@Translatable` calls. */
+    private fun isEvaluable(e: IrExpression): Boolean = when (stripImplicitCasts(e)) {
+        is IrConst, is IrGetValue, is IrGetObjectValue, is IrGetEnumValue, is IrFunctionExpression, is IrVararg -> false
+        else -> isClosed(e)
+    }
+
+    private fun isClosed(e: IrExpression): Boolean {
+        var closed = true
+        e.acceptVoid(object : IrVisitorVoid() {
+            override fun visitElement(element: IrElement) {
+                if (closed) element.acceptChildrenVoid(this)
+            }
+
+            override fun visitGetValue(expression: IrGetValue) {
+                if (expression.symbol in lambdaParameters || expression.symbol in opaqueLocals) closed = false
+            }
+
+            // Nested lambdas stay structure: the consumer handles `ids.any { it > 0 }`.
+            override fun visitFunctionExpression(expression: IrFunctionExpression) {
+                closed = false
+            }
+
+            override fun visitCall(expression: IrCall) {
+                if (isTranslatable(expression.symbol.owner)) closed = false else super.visitCall(expression)
+            }
+        })
+        return closed
+    }
+
+    /** `evaluable(<structure of e>, { e }, type)`. */
+    private fun evaluable(e: IrExpression): IrExpression {
+        structureOnly++
+        val original = try {
+            translateStructure(e)
+        } finally {
+            structureOnly--
+        }
+        return call(symbols.evaluable, original, thunk(e), str(typeName(e.type)))
+    }
+
+    /** `{ <copy of e> }: () -> Any?` — the quoted lambda's local `val`s are replaced with their initializers. */
+    private fun thunk(e: IrExpression): IrExpression {
+        val builtIns = context.irBuiltIns
+        val function = context.irFactory.buildFun {
+            startOffset = e.startOffset
+            endOffset = e.endOffset
+            name = SpecialNames.ANONYMOUS
+            origin = IrDeclarationOrigin.LOCAL_FUNCTION_FOR_LAMBDA
+            visibility = DescriptorVisibilities.LOCAL
+            returnType = builtIns.anyNType
+        }
+        function.parent = thunkParent!!
+        val inliner = object : IrElementTransformerVoid() {
+            override fun visitGetValue(expression: IrGetValue): IrExpression {
+                val initializer = localInitializers[expression.symbol] ?: return expression
+                return initializer.deepCopyWithSymbols(function).transform(this, null)
+            }
+        }
+        val body = e.deepCopyWithSymbols(function).transform(inliner, null)
+        function.body = DeclarationIrBuilder(context, function.symbol, e.startOffset, e.endOffset).irBlockBody {
+            +irReturn(body)
+        }
+        return IrFunctionExpressionImpl(
+            e.startOffset, e.endOffset,
+            builtIns.functionN(0).typeWith(builtIns.anyNType),
+            function,
+            IrStatementOrigin.LAMBDA,
+        )
+    }
+
+    private fun stripImplicitCasts(e: IrExpression): IrExpression {
+        var current = e
+        while (current is IrTypeOperatorCall && current.operator !in EXPLICIT_TYPE_OPERATORS) current = current.argument
+        return current
+    }
+
+    private fun isTranslatable(function: IrSimpleFunction) = function.annotations.any(::isTranslatableAnnotation)
+
+    private fun isTranslatableAnnotation(annotation: IrConstructorCall) =
+        annotation.symbol.owner.constructedClass.hasAnnotation(TRANSLATABLE)
+
+    // --- structure ---
+
+    private fun translateStructure(e: IrExpression): IrExpression = when (e) {
         is IrConst -> call(symbols.constant, e.deepCopyWithSymbols(), str(typeName(e.type)))
         is IrGetValue -> getValue(e)
         is IrGetObjectValue, is IrGetEnumValue -> call(symbols.constant, e.deepCopyWithSymbols(), str(typeName(e.type)))
         is IrCall -> translateCall(e)
         is IrConstructorCall -> {
-            // Пропущенные аргументы (значения по умолчанию) не попадают в дерево — имена сохраняют соответствие.
+            // Omitted arguments (default values) don't make it into the tree; the names keep the correspondence.
             val passed = e.symbol.owner.parameters
                 .filter { it.kind == IrParameterKind.Regular }
                 .mapNotNull { p -> e.arguments[p.indexInParameters]?.let { p.name.asString() to it } }
@@ -111,7 +243,7 @@ internal class ExpressionTreeBuilder(
             )
         }
         is IrFunctionExpression -> {
-            // Вложенная лямбда: `list.any { it > x }` — параметры внешней остаются видимыми.
+            // Nested lambda: `list.any { it > x }` — the outer lambda's parameters stay visible.
             val saved = lambdaParameters.toSet()
             lambda(e).also { lambdaParameters.retainAll(saved) }
         }
@@ -142,10 +274,10 @@ internal class ExpressionTreeBuilder(
 
     private fun getValue(e: IrGetValue): IrExpression {
         val symbol = e.symbol
-        locals[symbol]?.let { return it.deepCopyWithSymbols() }
+        locals[symbol]?.let { return it.deepCopyWithSymbols(thunkParent) }
         val owner = symbol.owner
         if (symbol in lambdaParameters && owner is IrValueParameter) return parameterRef(owner)
-        // Всё остальное — замыкание: значение читается в месте создания дерева.
+        // Everything else is a closure: the value is read where the tree is created.
         val name = when {
             owner is IrValueParameter && owner.kind == IrParameterKind.DispatchReceiver -> "this"
             owner is IrValueParameter && owner.kind == IrParameterKind.ExtensionReceiver -> "this"
@@ -167,10 +299,14 @@ internal class ExpressionTreeBuilder(
 
         if (isIrBuiltin(function)) return translateBuiltin(e, name, args)
 
+        // Functions with @Translatable annotations are always plain calls, never shortened to properties or operators.
+        val translatable = function.annotations.filter(::isTranslatableAnnotation)
+
         val dispatch = parameters.indexOfFirst { it.kind == IrParameterKind.DispatchReceiver }.takeIf { it >= 0 }?.let { args[it] }
         val extension = parameters.indexOfFirst { it.kind == IrParameterKind.ExtensionReceiver }.takeIf { it >= 0 }?.let { args[it] }
         val regular = parameters.indices.filter { parameters[it].kind == IrParameterKind.Regular }.map { args[it] }
-        val receiver = dispatch ?: extension
+        // The receiver the call is written on: for a member extension (`with(O) { s.len() }`) that's `s`, not `O`.
+        val receiver = extension ?: dispatch
 
         // `a != b` = `not(EQEQ(a, b))`, `a !== b` = `not(EQEQEQ(a, b))`.
         if (e.origin == IrStatementOrigin.EXCLEQ || e.origin == IrStatementOrigin.EXCLEQEQ) {
@@ -179,15 +315,15 @@ internal class ExpressionTreeBuilder(
             return binary(op, inner.arguments[0]!!, inner.arguments[1]!!, e.type)
         }
 
-        // Свойство: геттер превращается в MemberExpression.
-        function.correspondingPropertySymbol?.let { property ->
+        // Property: a getter becomes a MemberExpression.
+        if (translatable.isEmpty()) function.correspondingPropertySymbol?.let { property ->
             if (regular.isEmpty()) {
                 return member(receiver?.let { translate(it) }, property.owner.name.asString(), declaringType(function.parent), e.type)
             }
         }
 
-        // Операторы (встроенные и перегруженные): `a + b`, `-a`, `!a`, `a and b`.
-        if (receiver != null && extension == null) {
+        // Operators (built-in and overloaded): `a + b`, `-a`, `!a`, `a and b`.
+        if (receiver != null && extension == null && translatable.isEmpty()) {
             if (regular.size == 1) BINARY_OPERATORS[name]?.let { op ->
                 if (function.isOperator || function.isInfix) return binary(op, receiver, regular[0]!!, e.type)
             }
@@ -198,16 +334,20 @@ internal class ExpressionTreeBuilder(
 
         return call(
             symbols.call,
-            receiver?.let { translate(it) } ?: b.irNull(),
+            dispatch?.let { translate(it) } ?: b.irNull(),
+            extension?.let { translate(it) } ?: b.irNull(),
             str(name),
             declaringType(function.parent)?.let { str(it) } ?: b.irNull(),
-            b.irBoolean(extension != null),
             str(typeName(e.type)),
+            call(
+                symbols.annotations,
+                vararg(context.irBuiltIns.annotationType, translatable.map { it.deepCopyWithSymbols(thunkParent) }),
+            ),
             vararg(expressionType, regular.filterNotNull().map { translate(it) }),
         )
     }
 
-    /** Псевдофункции из `kotlin.internal.ir`: `==`, `===`, `<`, `>`, `!!` и т.д. */
+    /** Pseudo-functions from `kotlin.internal.ir`: `==`, `===`, `<`, `>`, `!!`, etc. */
     private fun translateBuiltin(e: IrCall, name: String, args: List<IrExpression?>): IrExpression {
         val op = when (name) {
             "EQEQ", "ieee754equals" -> "EQUAL"
@@ -221,7 +361,7 @@ internal class ExpressionTreeBuilder(
         }
         var left = args[0]!!
         var right = args[1]!!
-        // `a < b` для Comparable: `less(a.compareTo(b), 0)` — восстанавливаем исходную форму.
+        // `a < b` on Comparable is `less(a.compareTo(b), 0)` — restore the original form.
         if (op.startsWith("LESS") || op.startsWith("GREATER")) {
             if (left is IrCall && left.symbol.owner.name.asString() == "compareTo" && (right as? IrConst)?.value == 0) {
                 val compareTo = left
@@ -244,7 +384,7 @@ internal class ExpressionTreeBuilder(
                 return binary("OR", branches[0].condition, branches[1].result, e.type)
             }
         }
-        // if / when → цепочка ConditionalExpression.
+        // if / when → a chain of ConditionalExpressions.
         var result: IrExpression? = null
         for (branch in branches.asReversed()) {
             result = if (branch is IrElseBranch || branch.condition.isTrueConst()) {
@@ -268,7 +408,7 @@ internal class ExpressionTreeBuilder(
             IrTypeOperator.NOT_INSTANCEOF -> "NOT_IS"
             IrTypeOperator.CAST -> "AS"
             IrTypeOperator.SAFE_CAST -> "SAFE_AS"
-            // Неявные преобразования компилятора прозрачны для дерева.
+            // Implicit conversions inserted by the compiler are transparent to the tree.
             else -> return translate(e.argument)
         }
         return call(symbols.typeOperator, str(op), translate(e.argument), str(typeName(e.typeOperand)), str(typeName(e.type)))
@@ -284,10 +424,10 @@ internal class ExpressionTreeBuilder(
                 return binary("ELVIS", tmp.initializer!!, whenExpr.branches[0].result, e.type)
             }
         }
-        // Прочие блоки (`?.`, `when (x)`, ...) — временные переменные подставляются по месту использования.
+        // Other blocks (`?.`, `when (x)`, ...) — temporaries are inlined at their uses.
         for (statement in statements.dropLast(1)) {
             if (statement is IrVariable && statement.initializer != null) {
-                locals[statement.symbol] = translate(statement.initializer!!)
+                bindLocal(statement)
             } else {
                 throw UnsupportedExpression(statement, "statements are not supported in expression trees")
             }
@@ -329,6 +469,9 @@ internal class ExpressionTreeBuilder(
     }
 
     companion object {
+        private val EXPLICIT_TYPE_OPERATORS = setOf(
+            IrTypeOperator.INSTANCEOF, IrTypeOperator.NOT_INSTANCEOF, IrTypeOperator.CAST, IrTypeOperator.SAFE_CAST,
+        )
         private val BINARY_OPERATORS = mapOf(
             "plus" to "PLUS", "minus" to "MINUS", "times" to "TIMES", "div" to "DIV", "rem" to "REM",
             "and" to "BIT_AND", "or" to "BIT_OR", "xor" to "BIT_XOR",
@@ -340,7 +483,7 @@ internal class ExpressionTreeBuilder(
     }
 }
 
-/** Человекочитаемое имя типа: `kotlin.Int`, `kotlin.String?`, `T`. */
+/** A human-readable type name: `kotlin.Int`, `kotlin.String?`, `T`. */
 internal fun typeName(type: IrType): String {
     val base = type.classFqName?.asString()
         ?: ((type as? IrSimpleType)?.classifier?.owner as? IrTypeParameter)?.name?.asString()
