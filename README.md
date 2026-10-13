@@ -1,5 +1,6 @@
-![Maven Central Version](https://img.shields.io/maven-central/v/ru.ttraum/kexpression-compiler-plugin)
 # kexpression
+
+![Maven Central Version](https://img.shields.io/maven-central/v/ru.ttraum/kexpression-compiler-plugin)
 
 The Kotlin counterpart of C#'s `Expression<Func<...>>`. A compiler plugin (K2, IR) turns a lambda literal into code
 that builds an expression tree — **at compile time**. There is no reflection and no bytecode parsing at runtime.
