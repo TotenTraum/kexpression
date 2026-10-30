@@ -17,6 +17,14 @@ subprojects {
     group = providers.gradleProperty("buildInfo.group").get()
     version = providers.gradleProperty("buildInfo.version").get()
 
+    // The kexpression Gradle plugin adds published coordinates; inside this build they are the local modules.
+    configurations.configureEach {
+        resolutionStrategy.dependencySubstitution {
+            substitute(module("$group:kexpression-runtime")).using(project(":kexpression-runtime"))
+            substitute(module("$group:kexpression-compiler-plugin")).using(project(":kexpression-compiler-plugin"))
+        }
+    }
+
     plugins.withId("org.jetbrains.kotlin.jvm") {
         extensions.configure<JavaPluginExtension> {
             sourceCompatibility = JavaVersion.VERSION_17
@@ -87,5 +95,13 @@ subprojects {
                 providers.gradleProperty("signing.keyId").isPresent
             if (hasSigningKey) signAllPublications()
         }
+    }
+}
+
+// The Gradle plugin is an included build: root publish tasks publish it together with the subprojects.
+listOf("publishToMavenLocal", "publishAndReleaseToMavenCentral").forEach { name ->
+    tasks.register(name) {
+        group = "publishing"
+        dependsOn(gradle.includedBuild("kexpression-gradle-plugin").task(":$name"))
     }
 }

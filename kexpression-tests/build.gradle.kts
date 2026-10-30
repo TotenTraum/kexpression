@@ -3,6 +3,7 @@ import org.jetbrains.kotlin.gradle.ExperimentalWasmDsl
 // Shared tests of the compiler plugin and the runtime: the same commonTest on JVM, JS, Wasm and Native.
 plugins {
     kotlin("multiplatform")
+    id("ru.ttraum.kexpression")
 }
 
 kotlin {
@@ -16,16 +17,9 @@ kotlin {
 
     sourceSets {
         commonTest.dependencies {
-            implementation(project(":kexpression-runtime"))
             implementation(kotlin("test"))
         }
     }
-}
-
-// The plugin is attached to every compilation: JVM/JS/Wasm, and Native separately.
-dependencies {
-    "kotlinCompilerPluginClasspath"(project(":kexpression-compiler-plugin"))
-    "kotlinNativeCompilerPluginClasspath"(project(":kexpression-compiler-plugin"))
 }
 
 // Changes to the plugin must recompile the tests.

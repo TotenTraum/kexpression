@@ -1,4 +1,6 @@
 pluginManagement {
+    // Published separately; included so that kexpression-tests and sample use the plugin as a consumer would.
+    includeBuild("kexpression-gradle-plugin")
     repositories {
         gradlePluginPortal()
         mavenCentral()

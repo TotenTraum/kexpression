@@ -16,6 +16,37 @@ add(1, 3)           // 7 — compile() returns the original lambda, which is alr
 
 For an example consumer of the trees — a LINQ-style SQL provider — see [sample/README.md](sample/README.md).
 
+## Installation
+
+Apply the Gradle plugin next to a Kotlin plugin (`multiplatform`, `jvm` or `android`):
+
+```kotlin
+// settings.gradle.kts
+pluginManagement {
+    repositories {
+        mavenCentral()
+        gradlePluginPortal()
+    }
+}
+```
+
+```kotlin
+// build.gradle.kts
+plugins {
+    kotlin("multiplatform") version "2.4.20"
+    id("ru.ttraum.kexpression") version "0.1.0"
+}
+```
+
+The plugin attaches `kexpression-compiler-plugin` to every Kotlin compilation and adds `kexpression-runtime` of the same version
+to `commonMain` (or `implementation` for single-platform projects). To declare the runtime yourself:
+
+```kotlin
+kexpression {
+    addRuntimeDependency = false
+}
+```
+
 ## Two ways to get a tree
 
 **`expr { }`** — explicit quoting, like assigning a lambda to an `Expression<...>` in C#:
@@ -101,15 +132,8 @@ call.annotation<DbFunction>()?.name                         // "upper"
 
 ## Kotlin Multiplatform
 
-The plugin works on IR, which is the same for every backend. Attach it to all compilations:
-
-```kotlin
-dependencies {
-    implementation(project(":kexpression-runtime"))
-    "kotlinCompilerPluginClasspath"(project(":kexpression-compiler-plugin"))        // JVM, JS, Wasm
-    "kotlinNativeCompilerPluginClasspath"(project(":kexpression-compiler-plugin"))  // Native
-}
-```
+The plugin works on IR, which is the same for every backend. The Gradle plugin attaches it to all compilations
+(JVM, JS, Wasm, Native) — see [Installation](#installation).
 
 Platform specifics:
 - **JS:** a class can't implement a function type, so a `@Quoted` lambda isn't wrapped — the tree is stored in a property of the JS function itself. On the other platforms it's a wrapper, and the number of parameters is limited to four.
@@ -120,6 +144,7 @@ Platform specifics:
 | Module | Contents |
 |---|---|
 | `kexpression-runtime` | tree nodes, `Expr<F>`, `expr {}`, `@Quoted`, `EvaluationPolicy`, `@Translatable`, traversal and printing; KMP |
+| `kexpression-gradle-plugin` | the Gradle plugin `ru.ttraum.kexpression`: attaches the compiler plugin and the runtime; an included build |
 | `kexpression-compiler-plugin` | the IR plugin: replaces `expr { }` with `quoteExpr(lambda, <tree>)` and lambdas in `@Quoted` parameters with `quoteFunction(lambda, <tree>)` |
 | `kexpression-tests` | shared plugin tests (`commonTest`) on JVM, JS, Wasm and Native |
 | `sample` | a SQL provider built on expression trees (JVM only) — see [sample/README.md](sample/README.md) |
@@ -138,7 +163,7 @@ The Linux test binary (`linkDebugTestLinuxArm64`) can be built on macOS and run 
 
 ## Publishing
 
-`kexpression-runtime` (all KMP targets) and `kexpression-compiler-plugin` are published with
+`kexpression-runtime` (all KMP targets), `kexpression-compiler-plugin` and `kexpression-gradle-plugin` (with its plugin marker) are published with
 [vanniktech/gradle-maven-publish-plugin](https://github.com/vanniktech/gradle-maven-publish-plugin).
 Versions live in `gradle/libs.versions.toml`, Maven coordinates in `gradle.properties` (`buildInfo.*`).
 
@@ -153,12 +178,6 @@ Versions live in `gradle/libs.versions.toml`, Maven coordinates in `gradle.prope
 Maven Central credentials and the signing key are read from `~/.gradle/gradle.properties` and are never stored in
 this repository. Publications are signed only when a signing key is configured.
 
-```kotlin
-dependencies {
-    implementation("ru.ttraum:kexpression-runtime:0.1.0")
-    kotlinCompilerPluginClasspath("ru.ttraum:kexpression-compiler-plugin:0.1.0")
-}
-```
 
 ## Limitations
 
