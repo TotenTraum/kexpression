@@ -13,7 +13,11 @@ dependencyResolutionManagement {
         gradlePluginPortal()
     }
     versionCatalogs {
-        create("libs") { from(files("../gradle/libs.versions.toml")) }
+        create("libs") {
+            from(files("../gradle/libs.versions.toml"))
+            // Same override as in the root build: the plugin must be compiled against the tested Kotlin.
+            providers.gradleProperty("kotlinVersion").orNull?.let { version("kotlin", it) }
+        }
     }
 }
 

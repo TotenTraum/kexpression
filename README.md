@@ -163,6 +163,34 @@ Platform specifics:
 
 The Linux test binary (`linkDebugTestLinuxArm64`) can be built on macOS and run in a Linux container.
 
+### Other Kotlin versions
+
+The plugin is built for the Kotlin version pinned in `gradle/libs.versions.toml`. Any other release can be tried with
+`-PkotlinVersion` — it replaces Kotlin in the whole build, the Gradle plugin included:
+
+```bash
+./gradlew -PkotlinVersion=2.5.0-Beta2 :kexpression-tests:jvmTest :sample:test
+```
+
+This rebuilds the compiler plugin too, so it answers "would a plugin release for that Kotlin work" (source
+compatibility). Whether the plugin built with the pinned Kotlin — the one users get — runs on another compiler is a
+separate question (binary compatibility): the compiler's API can change in ways that still compile but break an
+already built plugin. `-PcompilerPluginJar` uses a prebuilt plugin instead of the `kexpression-compiler-plugin` module:
+
+```bash
+./gradlew :kexpression-compiler-plugin:jar
+```
+
+```bash
+./gradlew -PkotlinVersion=2.5.0-Beta2 -PcompilerPluginJar=kexpression-compiler-plugin/build/libs/kexpression-compiler-plugin-0.1.0.jar :kexpression-tests:jvmTest :sample:test
+```
+
+CI ([kotlin-compat.yml](.github/workflows/kotlin-compat.yml)) runs both checks on the latest patch of the pinned minor
+release, the latest stable release and the latest Beta/RC if it is newer, plus the regular tests on the pinned version —
+on every push and every Monday. Only the pinned version has to pass; the others are a compatibility report. A green
+binary run for a version means the published plugin can be used with it. Extra versions can be passed when the
+workflow is started by hand.
+
 ## Publishing
 
 `kexpression-runtime` (all KMP targets), `kexpression-compiler-plugin` and `kexpression-gradle-plugin` (with its plugin marker) are published with
@@ -186,4 +214,7 @@ this repository. Publications are signed only when a signing key is configured.
 - **Capture by value.** Captured variables are recorded when the tree is created. A regular lambda sees later changes to a `var`; the tree doesn't.
 - **Expressions only.** Trees have no statements: no assignments, loops or `var`.
 - **Argument names.** They aren't kept for function calls; they are kept for constructor calls.
-- **The plugin is built for Kotlin 2.4.20.** The compiler's IR API is unstable, so your project must use the same Kotlin version.
+- **Kotlin versions.** Version 0.1.0 is built with Kotlin 2.4.20 and checked to work with 2.4.0–2.4.21 and 2.5.0-Beta2.
+  Kotlin 2.3 and older are not supported: the plugin fails to load there. The compiler's IR API is unstable, so a new Kotlin
+  release can break the plugin — the [compatibility workflow](.github/workflows/kotlin-compat.yml) checks new releases
+  weekly (see [Other Kotlin versions](#other-kotlin-versions)).

@@ -13,6 +13,9 @@ plugins {
     alias(libs.plugins.publishPlugin) apply false
 }
 
+val prebuiltCompilerPlugin: File? = providers.gradleProperty("compilerPluginJar").orNull?.let { file(it) }
+extra["prebuiltCompilerPlugin"] = prebuiltCompilerPlugin
+
 subprojects {
     group = providers.gradleProperty("buildInfo.group").get()
     version = providers.gradleProperty("buildInfo.version").get()
@@ -22,6 +25,15 @@ subprojects {
         resolutionStrategy.dependencySubstitution {
             substitute(module("$group:kexpression-runtime")).using(project(":kexpression-runtime"))
             substitute(module("$group:kexpression-compiler-plugin")).using(project(":kexpression-compiler-plugin"))
+        }
+    }
+
+    // Binary compatibility (CI): -PcompilerPluginJar=<jar built with the pinned Kotlin> replaces the compiler plugin,
+    // so a newer compiler runs the plugin exactly as users get it, without recompiling it.
+    if (prebuiltCompilerPlugin != null) plugins.withId("ru.ttraum.kexpression") {
+        configurations.matching { it.name.startsWith("kotlinCompilerPluginClasspath") }.configureEach {
+            exclude(group = group.toString(), module = "kexpression-compiler-plugin")
+            dependencies.add(project.dependencies.create(files(prebuiltCompilerPlugin)))
         }
     }
 
@@ -104,4 +116,10 @@ listOf("publishToMavenLocal", "publishAndReleaseToMavenCentral").forEach { name 
         group = "publishing"
         dependsOn(gradle.includedBuild("kexpression-gradle-plugin").task(":$name"))
     }
+}
+
+// With another Kotlin (CI compatibility runs) the JS tooling resolves other npm versions than kotlin-js-store/yarn.lock
+// pins. That is not what those runs check, so the lock file is neither compared nor updated there.
+if (providers.gradleProperty("kotlinVersion").isPresent) {
+    tasks.matching { it.name == "kotlinStoreYarnLock" }.configureEach { enabled = false }
 }

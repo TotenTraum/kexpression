@@ -1,0 +1,137 @@
+# Tests the plugin against several Kotlin releases.
+# The compiler's IR API is unstable, so only the pinned version (gradle/libs.versions.toml) must pass;
+# the others are a compatibility report: what breaks on the next patch, the next minor, the next preview.
+#   source — the whole build, the compiler plugin included, is rebuilt with that Kotlin:
+#            "a plugin release for this Kotlin would work".
+#   binary — the compiler plugin is built with the pinned Kotlin and run by the newer compiler as is:
+#            "the already published plugin works with this Kotlin".
+name: Kotlin compatibility
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "0 5 * * 1" # every Monday: catch new Kotlin releases
+  workflow_dispatch:
+    inputs:
+      versions:
+        description: "Extra Kotlin versions, comma-separated (e.g. 2.4.0,2.5.0-RC)"
+        required: false
+
+jobs:
+  versions:
+    runs-on: ubuntu-latest
+    outputs:
+      pinned: ${{ steps.resolve.outputs.pinned }}
+      matrix: ${{ steps.resolve.outputs.matrix }}
+      others: ${{ steps.resolve.outputs.others }}
+    steps:
+      - uses: actions/checkout@v5
+      - id: resolve
+        name: Resolve Kotlin versions
+        env:
+          EXTRA: ${{ github.event.inputs.versions }}
+        run: |
+          pinned=$(sed -n 's/^kotlin *= *"\(.*\)"/\1/p' gradle/libs.versions.toml)
+          all=$(curl -sf https://repo1.maven.org/maven2/org/jetbrains/kotlin/kotlin-compiler-embeddable/maven-metadata.xml \
+            | grep -oE '<version>[^<]+</version>' | sed -E 's/<\/?version>//g')
+          minor=$(echo "$pinned" | cut -d. -f1,2)
+          stable=$(echo "$all" | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | sort -V)
+          latest_patch=$(echo "$stable" | grep "^$minor\." | tail -1)
+          latest_stable=$(echo "$stable" | tail -1)
+          # A preview (Beta/RC) only counts if it is newer than the latest stable release.
+          latest_preview=$(printf '%s\n' "$all" | { grep -E -- '-(Beta|RC)[0-9]*$' || true; } | sort -V | tail -1)
+          if [ "$(printf '%s\n%s\n' "$latest_stable" "${latest_preview%%-*}" | sort -V | tail -1)" = "$latest_stable" ]; then
+            latest_preview=""
+          fi
+          versions=$(printf '%s\n' "$pinned" "$latest_patch" "$latest_stable" "$latest_preview" $(echo "$EXTRA" | tr ',' ' ') \
+            | sed '/^$/d' | awk '!seen[$0]++')
+          echo "Kotlin versions:"; echo "$versions"
+          echo "pinned=$pinned" >> "$GITHUB_OUTPUT"
+          echo "matrix=$(echo "$versions" | jq -R . | jq -cs .)" >> "$GITHUB_OUTPUT"
+          echo "others=$(echo "$versions" | { grep -vxF "$pinned" || true; } | jq -R . | jq -cs .)" >> "$GITHUB_OUTPUT"
+
+  source:
+    needs: versions
+    name: Source, Kotlin ${{ matrix.kotlin }}
+    runs-on: ubuntu-latest
+    # Other versions report, they don't block: kexpression is built for one Kotlin version.
+    continue-on-error: ${{ matrix.kotlin != needs.versions.outputs.pinned }}
+    strategy:
+      fail-fast: false
+      matrix:
+        kotlin: ${{ fromJson(needs.versions.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: gradle/actions/setup-gradle@v5
+      - name: Test
+        run: >
+          ./gradlew -PkotlinVersion=${{ matrix.kotlin }} --continue
+          :kexpression-tests:jvmTest
+          :kexpression-tests:jsNodeTest
+          :kexpression-tests:wasmJsNodeTest
+          :kexpression-tests:linuxX64Test
+          :sample:test
+      - name: Upload reports
+        if: failure()
+        uses: actions/upload-artifact@v5
+        with:
+          name: reports-source-kotlin-${{ matrix.kotlin }}
+          path: "**/build/reports/"
+
+  binary:
+    needs: versions
+    # For the pinned version this is the same as the source run.
+    if: needs.versions.outputs.others != '[]'
+    name: Binary, Kotlin ${{ matrix.kotlin }}
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        kotlin: ${{ fromJson(needs.versions.outputs.others) }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: gradle/actions/setup-gradle@v5
+      - name: Build the compiler plugin with the pinned Kotlin
+        run: |
+          ./gradlew :kexpression-compiler-plugin:jar
+          cp kexpression-compiler-plugin/build/libs/kexpression-compiler-plugin-*.jar "$RUNNER_TEMP/kexpression-compiler-plugin.jar"
+      - name: Test with Kotlin ${{ matrix.kotlin }}
+        run: >
+          ./gradlew -PkotlinVersion=${{ matrix.kotlin }}
+          -PcompilerPluginJar=$RUNNER_TEMP/kexpression-compiler-plugin.jar --continue
+          :kexpression-tests:jvmTest
+          :kexpression-tests:jsNodeTest
+          :kexpression-tests:wasmJsNodeTest
+          :kexpression-tests:linuxX64Test
+          :sample:test
+      - name: Upload reports
+        if: failure()
+        uses: actions/upload-artifact@v5
+        with:
+          name: reports-binary-kotlin-${{ matrix.kotlin }}
+          path: "**/build/reports/"
+
+  # Apple targets need Xcode, which only macOS runners have; the pinned version is enough here.
+  macos:
+    needs: versions
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: gradle/actions/setup-gradle@v5
+      - name: Test
+        run: ./gradlew :kexpression-tests:macosArm64Test

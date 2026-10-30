@@ -22,7 +22,8 @@ kotlin {
     }
 }
 
-// Changes to the plugin must recompile the tests.
+// Changes to the plugin must recompile the tests. A prebuilt plugin (binary compatibility runs) is used as is.
+val prebuiltCompilerPlugin = rootProject.extra["prebuiltCompilerPlugin"] as File?
 tasks.withType<org.jetbrains.kotlin.gradle.tasks.AbstractKotlinCompileTool<*>>().configureEach {
-    inputs.files(project(":kexpression-compiler-plugin").tasks.named("jar"))
+    inputs.files(prebuiltCompilerPlugin ?: project(":kexpression-compiler-plugin").tasks.named("jar"))
 }
